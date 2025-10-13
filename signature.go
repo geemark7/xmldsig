@@ -128,7 +128,7 @@ type SignedProperties struct {
 	ID      string   `xml:"Id,attr"`
 
 	SignatureProperties  *SignedSignatureProperties `xml:"xades:SignedSignatureProperties"`
-	DataObjectProperties *DataObjectFormat          `xml:"xades:SignedDataObjectProperties>xades:DataObjectFormat"`
+	DataObjectProperties *DataObjectFormat          `xml:"xades:SignedDataObjectProperties>xades:DataObjectFormat,omitempty"`
 }
 
 // SignedSignatureProperties contains ...
@@ -136,7 +136,7 @@ type SignedSignatureProperties struct {
 	SigningTime        string              `xml:"xades:SigningTime"`
 	SigningCertificate *SigningCertificate `xml:"xades:SigningCertificate"`
 	PolicyIdentifier   *PolicyIdentifier   `xml:"xades:SignaturePolicyIdentifier"`
-	SignerRole         *SignerRole         `xml:"xades:SignerRole"`
+	SignerRole         *SignerRole         `xml:"xades:SignerRole,omitempty"`
 }
 
 // SigningCertificate contains ...
@@ -247,6 +247,12 @@ func newSignature(data []byte, opts ...Option) (*Signature, error) {
 	}
 
 	s.buildKeyInfo()
+	keyInfoXML, err := xml.MarshalIndent(s.KeyInfo, "", "  ")
+	if err != nil {
+		fmt.Printf("Error serializing KeyInfo: %v\n", err)
+	} else {
+		fmt.Printf("KeyInfo: %s\n", string(keyInfoXML))
+	}
 
 	if err := s.buildSignedInfo(); err != nil {
 		return nil, fmt.Errorf("signed info: %w", err)
@@ -297,7 +303,7 @@ func (s *Signature) buildQualifyingProperties() {
 				SigningCertificate: &SigningCertificate{
 					CertDigest: &Digest{
 						Method: &AlgorithmMethod{
-							Algorithm: AlgEncSHA512,
+							Algorithm: AlgEncSHA256,
 						},
 						Value: cert.Fingerprint(),
 					},
@@ -308,7 +314,7 @@ func (s *Signature) buildQualifyingProperties() {
 				},
 				PolicyIdentifier: s.xadesPolicyIdentifier(),
 			},
-			DataObjectProperties: &DataObjectFormat{
+			DataObjectProperties: nil, /* &DataObjectFormat{
 				ObjectReference: "#" + s.referenceID,
 				Description:     s.opts.xades.Description,
 				ObjectIdentifier: &ObjectIdentifier{
@@ -319,7 +325,7 @@ func (s *Signature) buildQualifyingProperties() {
 					// Description: "",
 				},
 				MimeType: "text/xml",
-			},
+			},*/
 		},
 	}
 
@@ -363,10 +369,10 @@ func (s *Signature) buildKeyInfo() {
 				certificate.NakedPEM(),
 			},
 		},
-		KeyValue: &KeyValue{
+		KeyValue: nil, /*&KeyValue{
 			Modulus:  certificate.PrivateKeyInfo().Modulus,
 			Exponent: certificate.PrivateKeyInfo().Exponent,
-		},
+		},*/
 	}
 
 	for _, ca := range certificate.CaChain {
@@ -391,7 +397,7 @@ func (s *Signature) buildSignedInfo() error {
 	}
 
 	// Add the document digest
-	docDigest, err := digestBytes(s.doc, s.opts.namespaces)
+	docDigest, err := digestBytes(s.doc, s.opts.namespaces) // this one is ok
 	if err != nil {
 		return fmt.Errorf("document digest: %w", err)
 	}
@@ -405,21 +411,21 @@ func (s *Signature) buildSignedInfo() error {
 			},
 		},
 		DigestMethod: &AlgorithmMethod{
-			Algorithm: "http://www.w3.org/2001/04/xmlenc#sha512",
+			Algorithm: AlgEncSHA256,
 		},
 		DigestValue: docDigest,
 	})
 
 	// Add the key info
-	ns := s.opts.namespaces.Add(DSig, NamespaceDSig)
-	keyInfoDigest, err := digest(s.KeyInfo, ns)
+	// ns := s.opts.namespaces.Add(DSig, NamespaceDSig)
+	keyInfoDigest, err := digest(s.KeyInfo, s.opts.namespaces)
 	if err != nil {
 		return fmt.Errorf("key info digest: %w", err)
 	}
 	si.Reference = append(si.Reference, &Reference{
 		URI: "#" + s.KeyInfo.ID,
 		DigestMethod: &AlgorithmMethod{
-			Algorithm: AlgEncSHA512,
+			Algorithm: AlgEncSHA256,
 		},
 		DigestValue: keyInfoDigest,
 	})
@@ -427,8 +433,8 @@ func (s *Signature) buildSignedInfo() error {
 	// Finally, if present, add the XAdES digests
 	if s.opts.xades != nil {
 		sp := s.Object.QualifyingProperties.SignedProperties
-		ns = ns.Add(XAdES, NamespaceXAdES)
-		spDigest, err := digest(sp, ns)
+		//ns = ns.Add(XAdES, NamespaceXAdES)
+		spDigest, err := digest(sp, s.opts.namespaces)
 		if err != nil {
 			return fmt.Errorf("xades digest: %w", err)
 		}
@@ -436,7 +442,7 @@ func (s *Signature) buildSignedInfo() error {
 			URI:  "#" + sp.ID,
 			Type: "http://uri.etsi.org/01903#SignedProperties",
 			DigestMethod: &AlgorithmMethod{
-				Algorithm: AlgEncSHA512,
+				Algorithm: AlgEncSHA256,
 			},
 			DigestValue: spDigest,
 		})

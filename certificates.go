@@ -86,7 +86,7 @@ func makeHash(data string) []byte {
 
 // Fingerprint will return the SHA512 hash of the public key
 func (cert *Certificate) Fingerprint() string {
-	hasher := crypto.SHA512.New()
+	hasher := crypto.SHA256.New()
 	hasher.Write(cert.certificate.Raw)
 	return base64.StdEncoding.EncodeToString(hasher.Sum(nil))
 }
