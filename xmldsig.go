@@ -28,7 +28,7 @@ type XAdESSignerRole string
 
 // XAdESConfig defines what is expected for the configuration.
 type XAdESConfig struct {
-	Role        XAdESSignerRole    `json:"role"`
+	Role        XAdESSignerRole    `json:"role,omitempty"`
 	Description string             `json:"description,omitempty"`
 	Policy      *XAdESPolicyConfig `json:"policy"`
 }

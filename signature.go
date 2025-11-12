@@ -4,10 +4,13 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/beevik/etree"
 	"github.com/invopop/gobl/uuid"
+	"github.com/ucarion/c14n"
 )
 
 // Namespaces
@@ -77,7 +80,13 @@ type Reference struct {
 
 // Transforms contains ...
 type Transforms struct {
-	Transform []*AlgorithmMethod `xml:"ds:Transform"`
+	Transform []*Transform `xml:"ds:Transform"`
+}
+
+// Transform contains transformation algorithm and optional XPath
+type Transform struct {
+	Algorithm string `xml:"Algorithm,attr"`
+	XPath     string `xml:"ds:XPath,omitempty"`
 }
 
 // Value contains ...
@@ -115,7 +124,7 @@ type Object struct {
 // `xades` namespace is required, so we can add it just here.
 type QualifyingProperties struct {
 	XAdESNamespace string `xml:"xmlns:xades,attr,omitempty"`
-	ID             string `xml:"Id,attr"`
+	ID             string `xml:"Id,attr,omitempty"`
 	Target         string `xml:"Target,attr"`
 
 	SignedProperties   *SignedProperties   `xml:"xades:SignedProperties"`
@@ -164,8 +173,9 @@ type IssuerSerial struct {
 
 // PolicyIdentifier contains ...
 type PolicyIdentifier struct {
-	SigPolicyID   *SigPolicyID `xml:"xades:SignaturePolicyId>xades:SigPolicyId"`
-	SigPolicyHash *Digest      `xml:"xades:SignaturePolicyId>xades:SigPolicyHash"`
+	SigPolicyID      *SigPolicyID `xml:"xades:SignaturePolicyId>xades:SigPolicyId,omitempty"`
+	SigPolicyHash    *Digest      `xml:"xades:SignaturePolicyId>xades:SigPolicyHash,omitempty"`
+	SigPolicyImplied *struct{}    `xml:"xades:SignaturePolicyImplied,omitempty"`
 }
 
 // SigPolicyID contains ...
@@ -208,9 +218,9 @@ type Identifier struct {
 
 const (
 	signatureIDFormat               = "Signature-%s"
-	signatureRootIDFormat           = "Signature-%s-Signature"
-	sigPropertiesIDFormat           = "Signature-%s-SignedProperties"
-	sigQualifyingPropertiesIDFormat = "Signature-%s-QualifyingProperties"
+	signatureRootIDFormat           = "Signature-%s" // Changed: removed -Signature suffix (compatible with mObywatel)
+	sigPropertiesIDFormat           = "xades-%s"     // Changed: use xades- prefix (compatible with mObywatel)
+	sigQualifyingPropertiesIDFormat = "QualifyingProps-%s"
 	referenceIDFormat               = "Reference-%s"
 	certificateIDFormat             = "Certificate-%s"
 )
@@ -244,15 +254,15 @@ func newSignature(data []byte, opts ...Option) (*Signature, error) {
 
 	if o.xades != nil {
 		s.buildQualifyingProperties()
+		// debug
+		//ob, _ := xml.Marshal(s.Object)
+		//fmt.Printf("s.Object: %s\n", ob)
 	}
 
 	s.buildKeyInfo()
-	keyInfoXML, err := xml.MarshalIndent(s.KeyInfo, "", "  ")
-	if err != nil {
-		fmt.Printf("Error serializing KeyInfo: %v\n", err)
-	} else {
-		fmt.Printf("KeyInfo: %s\n", string(keyInfoXML))
-	}
+	// debug
+	//ki, _ := xml.Marshal(s.KeyInfo)
+	//fmt.Printf("s.KeyInfo: %s\n", ki)
 
 	if err := s.buildSignedInfo(); err != nil {
 		return nil, fmt.Errorf("signed info: %w", err)
@@ -294,7 +304,7 @@ func (s *Signature) buildQualifyingProperties() {
 	cert := s.opts.cert
 	qp := &QualifyingProperties{
 		XAdESNamespace: NamespaceXAdES,
-		ID:             fmt.Sprintf(sigQualifyingPropertiesIDFormat, s.opts.docID),
+		ID:             "", //fmt.Sprintf(sigQualifyingPropertiesIDFormat, s.opts.docID),
 		Target:         fmt.Sprintf("#"+signatureRootIDFormat, s.opts.docID),
 		SignedProperties: &SignedProperties{
 			ID: fmt.Sprintf(sigPropertiesIDFormat, s.opts.docID),
@@ -343,7 +353,10 @@ func (s *Signature) buildQualifyingProperties() {
 func (s *Signature) xadesPolicyIdentifier() *PolicyIdentifier {
 	policy := s.opts.xades.Policy
 	if policy == nil {
-		return nil
+		// Return SignaturePolicyImplied when no explicit policy is provided
+		return &PolicyIdentifier{
+			SigPolicyImplied: &struct{}{},
+		}
 	}
 
 	return &PolicyIdentifier{
@@ -387,11 +400,10 @@ func (s *Signature) buildKeyInfo() {
 func (s *Signature) buildSignedInfo() error {
 	si := &SignedInfo{
 		CanonicalizationMethod: &AlgorithmMethod{
-			Algorithm: "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+			Algorithm: "http://www.w3.org/2001/10/xml-exc-c14n#",
 		},
 		SignatureMethod: &AlgorithmMethod{
-			Algorithm: AlgDSigRSASHA256,
-			//Algorithm: AlgDSigRSASHA1,
+			Algorithm: s.opts.cert.SignatureAlgorithm(),
 		},
 		Reference: []*Reference{},
 	}
@@ -401,13 +413,15 @@ func (s *Signature) buildSignedInfo() error {
 	if err != nil {
 		return fmt.Errorf("document digest: %w", err)
 	}
+	// Use enveloped-signature transform (simpler and may be accepted by KSeF)
+	// Remove Type attribute from document reference (compatible with mObywatel format)
 	si.Reference = append(si.Reference, &Reference{
-		ID:   s.referenceID,
-		Type: "http://www.w3.org/2000/09/xmldsig#Object",
-		URI:  "",
+		ID:  s.referenceID,
+		URI: "",
 		Transforms: &Transforms{
-			Transform: []*AlgorithmMethod{
+			Transform: []*Transform{
 				{Algorithm: "http://www.w3.org/2000/09/xmldsig#enveloped-signature"},
+				{Algorithm: "http://www.w3.org/2001/10/xml-exc-c14n#"},
 			},
 		},
 		DigestMethod: &AlgorithmMethod{
@@ -418,29 +432,64 @@ func (s *Signature) buildSignedInfo() error {
 
 	// Add the key info
 	// ns := s.opts.namespaces.Add(DSig, NamespaceDSig)
-	keyInfoDigest, err := digest(s.KeyInfo, s.opts.namespaces)
-	if err != nil {
-		return fmt.Errorf("key info digest: %w", err)
-	}
-	si.Reference = append(si.Reference, &Reference{
-		URI: "#" + s.KeyInfo.ID,
-		DigestMethod: &AlgorithmMethod{
-			Algorithm: AlgEncSHA256,
-		},
-		DigestValue: keyInfoDigest,
-	})
+	// commented for debug
+	/*
+		keyInfoDigest, err := digest(s.KeyInfo, s.opts.namespaces)
+		if err != nil {
+			return fmt.Errorf("key info digest: %w", err)
+		}
+		si.Reference = append(si.Reference, &Reference{
+			URI: "#" + s.KeyInfo.ID,
+			DigestMethod: &AlgorithmMethod{
+				Algorithm: AlgEncSHA256,
+			},
+			DigestValue: keyInfoDigest,
+		})*/
 
 	// Finally, if present, add the XAdES digests
 	if s.opts.xades != nil {
 		sp := s.Object.QualifyingProperties.SignedProperties
-		//ns = ns.Add(XAdES, NamespaceXAdES)
-		spDigest, err := digest(sp, s.opts.namespaces)
+		// For Exclusive C14N, add both DS and XAdES namespaces to the root of extracted fragment
+		// because both are used within SignedProperties subtree but declared in ancestors
+		spNamespaces := make(Namespaces)
+		spNamespaces = spNamespaces.Add(DSig, NamespaceDSig).Add(XAdES, NamespaceXAdES)
+
+		// DEBUG: Show what we're hashing and save to file
+		debugData, _ := xml.Marshal(sp)
+		fmt.Printf("\n=== DEBUG: SignedProperties BEFORE canonicalization ===\n%s\n", string(debugData))
+
+		// Save canonicalized version to file for xmlsec comparison
+		canonData, canonErr := canonicalize(debugData, spNamespaces)
+		if canonErr == nil {
+			os.WriteFile("C:\\Users\\mg\\AppData\\Local\\Marcom\\KSeF2-client\\debug_canonicalized_sp.xml", canonData, 0644)
+			fmt.Printf("=== Saved canonicalized SignedProperties to debug_canonicalized_sp.xml ===\n")
+		}
+		// Test: użycie drugiej metody kanonizacji (c14n library - Inclusive C14N)
+		// First add namespace declarations manually to the XML string
+		xmlWithNS := strings.Replace(string(debugData),
+			"<xades:SignedProperties",
+			`<xades:SignedProperties xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"`,
+			1)
+		decoder := xml.NewDecoder(strings.NewReader(xmlWithNS))
+		canonData2, canonErr2 := c14n.Canonicalize(decoder)
+		if canonErr2 == nil {
+			os.WriteFile("C:\\Users\\mg\\AppData\\Local\\Marcom\\KSeF2-client\\debug_canonicalized_sp2.xml", canonData2, 0644)
+			fmt.Printf("=== Saved c14n library (Inclusive C14N) result to debug_canonicalized_sp2.xml ===\n")
+		}
+
+		spDigest, err := digestExclusiveC14N(sp, spNamespaces)
 		if err != nil {
 			return fmt.Errorf("xades digest: %w", err)
 		}
+		fmt.Printf("=== SignedProperties digest = %s ===\n", spDigest)
 		si.Reference = append(si.Reference, &Reference{
 			URI:  "#" + sp.ID,
 			Type: "http://uri.etsi.org/01903#SignedProperties",
+			Transforms: &Transforms{
+				Transform: []*Transform{
+					{Algorithm: "http://www.w3.org/2001/10/xml-exc-c14n#"},
+				},
+			},
 			DigestMethod: &AlgorithmMethod{
 				Algorithm: AlgEncSHA256,
 			},
@@ -460,10 +509,14 @@ func (s *Signature) buildSignatureValue() error {
 		return err
 	}
 	ns := s.opts.namespaces.Add(DSig, s.DSigNamespace)
-	data, err = canonicalize(data, ns)
+	data, err = canonicalizeExclusiveC14N(data, ns)
 	if err != nil {
-		return fmt.Errorf("canonicalize: %w", err)
+		return fmt.Errorf("canonicalize SignedInfo: %w", err)
 	}
+
+	// DEBUG: Show what we're signing and save to file
+	fmt.Printf("\n=== DEBUG: Canonicalized SignedInfo (for signature) ===\n%s\n", string(data))
+	os.WriteFile("C:\\Users\\mg\\AppData\\Local\\Marcom\\KSeF2-client\\debug_signedinfo_canonical.xml", data, 0644)
 
 	signatureValue, err := s.opts.cert.Sign(string(data[:]))
 	if err != nil {

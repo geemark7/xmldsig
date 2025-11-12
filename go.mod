@@ -8,6 +8,7 @@ require (
 	github.com/beevik/etree v1.5.1
 	github.com/invopop/gobl v0.218.0
 	github.com/stretchr/testify v1.10.0
+	github.com/ucarion/c14n v0.1.0
 	software.sslmate.com/src/go-pkcs12 v0.5.0
 )
 

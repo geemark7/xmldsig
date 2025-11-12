@@ -2,6 +2,7 @@ package xmldsig
 
 import (
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -24,7 +25,7 @@ var ErrNotFound = errors.New("not found")
 // Certificate stores information about a signing Certificate
 // which can be used to sign a facturae XML
 type Certificate struct {
-	privateKey  *rsa.PrivateKey
+	privateKey  crypto.PrivateKey // Can be *rsa.PrivateKey or *ecdsa.PrivateKey
 	certificate *x509.Certificate
 	CaChain     []*x509.Certificate
 	issuer      *pkix.RDNSequence
@@ -55,9 +56,16 @@ func LoadCertificate(path, password string) (*Certificate, error) {
 		return nil, err
 	}
 
-	rsaPrivateKey := privateKey.(*rsa.PrivateKey)
+	// Support both RSA and ECDSA keys
+	switch privateKey.(type) {
+	case *rsa.PrivateKey, *ecdsa.PrivateKey:
+		// Valid key types
+	default:
+		return nil, fmt.Errorf("unsupported private key type: %T", privateKey)
+	}
+
 	return &Certificate{
-		privateKey:  rsaPrivateKey,
+		privateKey:  privateKey,
 		certificate: certificate,
 		CaChain:     caChain,
 		issuer:      issuer,
@@ -70,7 +78,18 @@ func LoadCertificate(path, password string) (*Certificate, error) {
 func (cert *Certificate) Sign(data string) (string, error) {
 	hash := makeHash(data)
 
-	signature, signingErr := rsa.SignPKCS1v15(rand.Reader, cert.privateKey, crypto.SHA256, hash)
+	var signature []byte
+	var signingErr error
+
+	switch key := cert.privateKey.(type) {
+	case *rsa.PrivateKey:
+		signature, signingErr = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, hash)
+	case *ecdsa.PrivateKey:
+		signature, signingErr = ecdsa.SignASN1(rand.Reader, key, hash)
+	default:
+		return "", fmt.Errorf("unsupported private key type: %T", cert.privateKey)
+	}
+
 	if signingErr != nil {
 		return "", signingErr
 	}
@@ -104,7 +123,14 @@ func (cert *Certificate) PEM() []byte {
 
 // PrivateKey provides the private key in PEM format.
 func (cert *Certificate) PrivateKey() []byte {
-	return PEMPrivateRSAKey(cert.privateKey)
+	switch key := cert.privateKey.(type) {
+	case *rsa.PrivateKey:
+		return PEMPrivateRSAKey(key)
+	case *ecdsa.PrivateKey:
+		return PEMPrivateECDSAKey(key)
+	default:
+		return nil
+	}
 }
 
 // NakedPEM converts a x509 formated certificate to the PEM format without
@@ -137,6 +163,19 @@ func PEMPrivateRSAKey(key *rsa.PrivateKey) []byte {
 	return pem.EncodeToMemory(pb)
 }
 
+// PEMPrivateECDSAKey issues a PEM string with the ECDSA Key.
+func PEMPrivateECDSAKey(key *ecdsa.PrivateKey) []byte {
+	keyBytes, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil
+	}
+	pb := &pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: keyBytes,
+	}
+	return pem.EncodeToMemory(pb)
+}
+
 // Issuer returns a description of the certificate issuer
 func (cert *Certificate) Issuer() string {
 	return cert.issuer.String()
@@ -147,15 +186,35 @@ func (cert *Certificate) SerialNumber() string {
 	return cert.certificate.SerialNumber.String()
 }
 
-// PrivateKeyInfo is the  RSA private key info
+// SignatureAlgorithm returns the XML-DSig signature algorithm URI
+// based on the private key type (RSA or ECDSA)
+func (cert *Certificate) SignatureAlgorithm() string {
+	switch cert.privateKey.(type) {
+	case *ecdsa.PrivateKey:
+		return "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256"
+	case *rsa.PrivateKey:
+		return "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
+	default:
+		return "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256" // fallback
+	}
+}
+
+// PrivateKeyInfo is the RSA private key info
+// Note: This function only works with RSA keys, returns nil for ECDSA
 func (cert *Certificate) PrivateKeyInfo() *PrivateKeyInfo {
+	rsaKey, ok := cert.privateKey.(*rsa.PrivateKey)
+	if !ok {
+		// ECDSA keys don't have modulus/exponent
+		return nil
+	}
+
 	exponentBytes := make([]byte, 3)
-	exponentBytes[0] = byte(cert.privateKey.E >> 16)
-	exponentBytes[1] = byte(cert.privateKey.E >> 8)
-	exponentBytes[2] = byte(cert.privateKey.E)
+	exponentBytes[0] = byte(rsaKey.E >> 16)
+	exponentBytes[1] = byte(rsaKey.E >> 8)
+	exponentBytes[2] = byte(rsaKey.E)
 
 	return &PrivateKeyInfo{
-		Modulus:  base64.StdEncoding.EncodeToString(cert.privateKey.N.Bytes()),
+		Modulus:  base64.StdEncoding.EncodeToString(rsaKey.N.Bytes()),
 		Exponent: base64.StdEncoding.EncodeToString(exponentBytes),
 	}
 }
