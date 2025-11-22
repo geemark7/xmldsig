@@ -28,9 +28,6 @@ func digestBytes(data []byte, ns Namespaces) (string, error) {
 		return "", err
 	}
 	
-	// DEBUG: Show canonicalized XML
-	fmt.Printf("\n=== DEBUG: AFTER canonicalization ===\n%s\n", string(out))
-	
 	sum := sha256.Sum256(out)
 	//sum := sha256.Sum256(data)
 	return base64.StdEncoding.EncodeToString(sum[:]), nil
@@ -56,9 +53,6 @@ func digestExclusiveC14N(doc interface{}, ns Namespaces) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
-	// DEBUG: Show canonicalized XML
-	fmt.Printf("\n=== DEBUG: Exclusive C14N (c14n library) ===\n%s\n", string(canonicalized))
 	
 	sum := sha256.Sum256(canonicalized)
 	return base64.StdEncoding.EncodeToString(sum[:]), nil

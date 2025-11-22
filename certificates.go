@@ -85,7 +85,21 @@ func (cert *Certificate) Sign(data string) (string, error) {
 	case *rsa.PrivateKey:
 		signature, signingErr = rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, hash)
 	case *ecdsa.PrivateKey:
-		signature, signingErr = ecdsa.SignASN1(rand.Reader, key, hash)
+		// ECDSA signature for XML-DSig must be in r||s format (RFC 4050, RFC 6931)
+		// NOT ASN.1 DER format!
+		r, s, err := ecdsa.Sign(rand.Reader, key, hash)
+		if err != nil {
+			return "", err
+		}
+
+		// Get the key size in bytes (32 for P-256, 48 for P-384, 66 for P-521)
+		keyBytes := (key.Curve.Params().BitSize + 7) / 8
+
+		// Convert r and s to fixed-size byte arrays and concatenate
+		rBytes := r.FillBytes(make([]byte, keyBytes))
+		sBytes := s.FillBytes(make([]byte, keyBytes))
+		signature = append(rBytes, sBytes...)
+		signingErr = nil
 	default:
 		return "", fmt.Errorf("unsupported private key type: %T", cert.privateKey)
 	}

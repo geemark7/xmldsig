@@ -4,13 +4,10 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/beevik/etree"
 	"github.com/invopop/gobl/uuid"
-	"github.com/ucarion/c14n"
 )
 
 // Namespaces
@@ -322,7 +319,7 @@ func (s *Signature) buildQualifyingProperties() {
 						SerialNumber: cert.SerialNumber(),
 					},
 				},
-				PolicyIdentifier: s.xadesPolicyIdentifier(),
+				PolicyIdentifier: nil, // s.xadesPolicyIdentifier(), Policy Identifier not needed at all in KSeF
 			},
 			DataObjectProperties: nil, /* &DataObjectFormat{
 				ObjectReference: "#" + s.referenceID,
@@ -454,34 +451,10 @@ func (s *Signature) buildSignedInfo() error {
 		spNamespaces := make(Namespaces)
 		spNamespaces = spNamespaces.Add(DSig, NamespaceDSig).Add(XAdES, NamespaceXAdES)
 
-		// DEBUG: Show what we're hashing and save to file
-		debugData, _ := xml.Marshal(sp)
-		fmt.Printf("\n=== DEBUG: SignedProperties BEFORE canonicalization ===\n%s\n", string(debugData))
-
-		// Save canonicalized version to file for xmlsec comparison
-		canonData, canonErr := canonicalize(debugData, spNamespaces)
-		if canonErr == nil {
-			os.WriteFile("C:\\Users\\mg\\AppData\\Local\\Marcom\\KSeF2-client\\debug_canonicalized_sp.xml", canonData, 0644)
-			fmt.Printf("=== Saved canonicalized SignedProperties to debug_canonicalized_sp.xml ===\n")
-		}
-		// Test: użycie drugiej metody kanonizacji (c14n library - Inclusive C14N)
-		// First add namespace declarations manually to the XML string
-		xmlWithNS := strings.Replace(string(debugData),
-			"<xades:SignedProperties",
-			`<xades:SignedProperties xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"`,
-			1)
-		decoder := xml.NewDecoder(strings.NewReader(xmlWithNS))
-		canonData2, canonErr2 := c14n.Canonicalize(decoder)
-		if canonErr2 == nil {
-			os.WriteFile("C:\\Users\\mg\\AppData\\Local\\Marcom\\KSeF2-client\\debug_canonicalized_sp2.xml", canonData2, 0644)
-			fmt.Printf("=== Saved c14n library (Inclusive C14N) result to debug_canonicalized_sp2.xml ===\n")
-		}
-
 		spDigest, err := digestExclusiveC14N(sp, spNamespaces)
 		if err != nil {
 			return fmt.Errorf("xades digest: %w", err)
 		}
-		fmt.Printf("=== SignedProperties digest = %s ===\n", spDigest)
 		si.Reference = append(si.Reference, &Reference{
 			URI:  "#" + sp.ID,
 			Type: "http://uri.etsi.org/01903#SignedProperties",
@@ -508,15 +481,16 @@ func (s *Signature) buildSignatureValue() error {
 	if err != nil {
 		return err
 	}
-	ns := s.opts.namespaces.Add(DSig, s.DSigNamespace)
-	data, err = canonicalizeExclusiveC14N(data, ns)
+	// For SignedInfo, only add namespaces that are actually USED in SignedInfo
+	// SignedInfo only uses ds: prefix, so we only need xmlns:ds
+	// Do NOT add root document namespaces here - that's wrong for Exclusive C14N!
+	siNamespaces := make(Namespaces)
+	siNamespaces = siNamespaces.Add(DSig, s.DSigNamespace)
+
+	data, err = canonicalizeExclusiveC14N(data, siNamespaces)
 	if err != nil {
 		return fmt.Errorf("canonicalize SignedInfo: %w", err)
 	}
-
-	// DEBUG: Show what we're signing and save to file
-	fmt.Printf("\n=== DEBUG: Canonicalized SignedInfo (for signature) ===\n%s\n", string(data))
-	os.WriteFile("C:\\Users\\mg\\AppData\\Local\\Marcom\\KSeF2-client\\debug_signedinfo_canonical.xml", data, 0644)
 
 	signatureValue, err := s.opts.cert.Sign(string(data[:]))
 	if err != nil {
